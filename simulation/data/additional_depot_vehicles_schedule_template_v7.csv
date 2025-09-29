@@ -1,0 +1,7 @@
+﻿day_of_week,depot_name,start_hour,end_hour,num_vehicles,service_area
+월,병점차고지,16,21,4,BOTH
+월,향남차고지,16,21,4,BOTH
+수,병점차고지,16,20,4,BOTH
+수,향남차고지,16,20,4,BOTH
+금,병점차고지,16,21,4,BOTH
+금,향남차고지,16,21,4,BOTH
