@@ -45,6 +45,7 @@ python a_drt_routing_algorithm.py
       - 주어진 경로(`path`)의 총 이동 거리를 계산합니다.
   - **`assign_passenger_to_vehicle(...)` 함수**:
       - **핵심 로직이 담긴 함수**입니다.
+      - 동적 차량 경로 문제(Dynamic Vehicle Routing Problem) 해결을 위한 삽입 휴리스틱(Insertion Heuristic) 알고리즘을 사용한 것입니다. 조금 더 구체적으로는 최소 추가 비용 삽입(Lowest Cost Insertion) 또는 탐욕적 삽입(Greedy Insertion) 방식이라고 부를 수 있습니다.
       - 신규 승객 정보를 받아 모든 차량의 모든 경로 조합을 테스트하여, 최소 추가 비용이 발생하는 최적의 차량과 새로운 경로를 반환합니다.
 
 ## 📊 시뮬레이션 예제 분석
