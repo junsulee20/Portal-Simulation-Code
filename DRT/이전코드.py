@@ -65,8 +65,8 @@ def assign_passenger_to_vehicle(vehicles, new_passenger_pickup, new_passenger_dr
 # --- 시뮬레이션 예제 ---
 if __name__ == "__main__":
     # 1. 시뮬레이션 환경 설정
-    NUM_EXISTING_PASSENGERS = 100
-    NUM_NEW_PASSENGERS = 20
+    NUM_EXISTING_PASSENGERS = 20
+    NUM_NEW_PASSENGERS = 100
     vehicles = [Vehicle(id=1), Vehicle(id=2)]
     
     print(f"--- 시뮬레이션 시작: 2개 차량에 기존 승객 {NUM_EXISTING_PASSENGERS}명이 탑승한 상황 ---")

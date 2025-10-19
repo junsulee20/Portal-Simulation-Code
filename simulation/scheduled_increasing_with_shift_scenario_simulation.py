@@ -141,7 +141,7 @@ class ScheduledIncreaseWithShiftSimulation:
     def load_network(self):
         print('네트워크 로드 중...')
         try:
-            with open('network/main_network_graph.pkl', 'rb') as f:
+            with open('C:/Users/junho/OneDrive/문서/4학년 2학기/교통 시뮬레이터/simulation/network/main_network_graph.pkl', 'rb') as f:
                 self.network_graph = pickle.load(f)
             print(f'   노드: {self.network_graph.number_of_nodes():,}개')
             print(f'   링크: {self.network_graph.number_of_edges():,}개')
@@ -153,7 +153,7 @@ class ScheduledIncreaseWithShiftSimulation:
     def load_depot_info(self):
         print('차고지 정보 로드 중...')
         try:
-            depot_df = pd.read_csv('network/depot_main_network_mapping_fixed.csv')
+            depot_df = pd.read_csv('C:/Users/junho/OneDrive/문서/4학년 2학기/교통 시뮬레이터/simulation/network/depot_main_network_mapping_fixed.csv')
             for _, row in depot_df.iterrows():
                 depot_name = row['region_name']
                 self.depot_info[depot_name] = {
