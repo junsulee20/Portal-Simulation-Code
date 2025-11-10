@@ -7,12 +7,12 @@ from matplotlib.animation import FuncAnimation
 import copy # 객체의 깊은 복사를 위해 추가
 
 # --- 0. 시뮬레이션 상수 정의 ---
-SIMULATION_TIME = 1000       # 총 시뮬레이션 시간
+SIMULATION_TIME = 2000       # 총 시뮬레이션 시간
 VEHICLE_SPEED = 4.0         # 차량의 시간당 이동 속도
-NUM_EXISTING_PASSENGERS = 20 # 기존 승객 수
-NUM_NEW_PASSENGERS = 100     # 신규 승객 수
-NEW_REQUEST_INTERVAL = 10   # 신규 승객 요청이 들어오는 시간 간격
-STATUS_PRINT_INTERVAL = 10  # 텍스트로 현재 상태를 출력하는 시간 간격
+NUM_EXISTING_PASSENGERS = 4 # 기존 승객 수
+NUM_NEW_PASSENGERS = 300     # 신규 승객 수
+NEW_REQUEST_INTERVAL = 5   # 신규 승객 요청이 들어오는 시간 간격
+STATUS_PRINT_INTERVAL = 100  # 텍스트로 현재 상태를 출력하는 시간 간격
 
 # --- 1. 기본 클래스 및 함수 정의 ---
 class Point:
