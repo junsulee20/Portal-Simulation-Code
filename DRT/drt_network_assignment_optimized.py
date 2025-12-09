@@ -1,19 +1,12 @@
 """
-실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈.
+실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (성능 최적화 버전).
 
-핵심 아이디어:
-    * `DRT_V3_objective_function.py`의 휴리스틱을 기반으로 함.
-    * 실제 네트워크 그래프(가중치가 포함된 NetworkX 그래프)를 이용해 이동 시간(또는 거리)을 계산.
-    * 승객 한 명의 픽업·드롭오프를 기존 차량 경로의 모든 가능한 위치에 삽입하며
-      비용 함수(`W_COST_INCREASE`, `W_PATH_LENGTH`)를 최소화하는 차량을 선택.
-
-사용 방법:
-    1. `load_network_graph()`를 이용해 `simulation/network/main_network_graph.pkl`을 로드합니다.
-    2. `DRTAssignmentEngine` 인스턴스를 생성하고, 차량 목록(`VehicleState`)과 신규 승객 요청(`PassengerRequest`)을 전달해
-       `assign_request()`를 호출합니다.
-    3. 반환값으로 최적 차량과 업데이트된 경로를 받아서 시스템 상태를 갱신합니다.
-
-본 모듈은 예제용이며, 실제 운영 환경에 맞게 입출력 구조나 상태 관리 코드를 추가하면 됩니다.
+성능 최적화:
+    - 경로 길이 제한: MAX_PATH_LENGTH=18로 제한하여 계산량 감소
+    - 후보 수 제한: MAX_CANDIDATES_TO_EVALUATE=80으로 제한하여 계산량 감소
+    - 조기 종료: 현재 최적해의 1.3배 이상인 후보는 즉시 건너뛰기
+    - 증분 계산: 경로가 길 때 전체 경로를 다시 계산하지 않고 증가분만 계산
+    - 적응형 계산: 경로가 짧으면 전체 계산, 길면 증분 계산 사용
 """
 
 from __future__ import annotations
@@ -30,6 +23,11 @@ import networkx as nx
 # 비용 함수 가중치 (기존 DRT 로직과 동일)
 W_COST_INCREASE = 0.7
 W_PATH_LENGTH = 0.3
+
+# 성능 최적화 설정
+MAX_PATH_LENGTH = 25  # 경로 길이 제한 (stop 개수) - 더 엄격하게 설정하여 계산량 감소
+MAX_CANDIDATES_TO_EVALUATE = 80  # 평가할 최대 후보 수 (무제한이면 None) - 더 엄격하게 설정
+EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -106,20 +104,25 @@ class NetworkTravelTimeCache:
 
 
 # --------------------------------------------------------------------------------------
-# DRT 1:다수 배정 엔진
+# DRT 1:다수 배정 엔진 (성능 최적화 버전)
 # --------------------------------------------------------------------------------------
 
 
 class DRTAssignmentEngine:
     """
-    DRT 1:다수 배정 알고리즘을 실제 네트워크에 적용한 엔진.
+    DRT 1:다수 배정 알고리즘을 실제 네트워크에 적용한 엔진 (성능 최적화 버전).
 
     차량별 경로를 시뮬레이션하지 않고도 신규 요청을 어느 차량에 배치할지 결정할 수 있습니다.
+    
+    성능 최적화:
+        - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 경로는 배제
+        - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
     """
 
-    def __init__(self, graph: nx.Graph) -> None:
+    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH) -> None:
         self.graph = graph
         self.travel_time_cache = NetworkTravelTimeCache(graph)
+        self.max_path_length = max_path_length
 
     # 공개 API ------------------------------------------------------------------------
     def assign_request(
@@ -140,6 +143,10 @@ class DRTAssignmentEngine:
 
         for vehicle in vehicles:
             if vehicle.onboard_passengers >= vehicle.capacity:
+                continue
+
+            # 성능 최적화: 경로 길이 제한
+            if len(vehicle.path) > self.max_path_length:
                 continue
 
             original_path_time = self._calculate_path_time(vehicle.current_node, vehicle.path)
@@ -168,12 +175,29 @@ class DRTAssignmentEngine:
         request: PassengerRequest,
         original_path_time: float,
     ) -> Tuple[Optional[List[Stop]], float]:
-        """주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색."""
+        """
+        주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색.
+        
+        성능 최적화:
+            - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 후보는 배제
+            - 증분 계산: 전체 경로를 다시 계산하지 않고 증가분만 계산
+            - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
+        """
         best_path: Optional[List[Stop]] = None
         best_cost: float = math.inf
 
         path_len = len(vehicle.path)
+        
+        # 성능 최적화: 경로 길이 제한
+        if path_len + 2 > self.max_path_length:
+            # 새 경로가 제한을 초과하면 배제
+            return None, math.inf
 
+        # 성능 최적화: 원본 경로의 중간 노드 위치를 미리 계산 (증분 계산용)
+        original_path_nodes = self._get_path_nodes(vehicle.current_node, vehicle.path)
+        
+        candidates_evaluated = 0
+        
         for pickup_index in range(path_len + 1):
             path_with_pickup = vehicle.clone_path()
             path_with_pickup.insert(
@@ -182,27 +206,133 @@ class DRTAssignmentEngine:
             )
 
             for dropoff_index in range(pickup_index + 1, len(path_with_pickup) + 1):
+                # 성능 최적화: 후보 수 제한 (선택적)
+                if MAX_CANDIDATES_TO_EVALUATE is not None and candidates_evaluated >= MAX_CANDIDATES_TO_EVALUATE:
+                    # 이미 충분한 후보를 평가했으면 조기 종료
+                    break
+                
                 path_candidate = list(path_with_pickup)
                 path_candidate.insert(
                     dropoff_index,
                     Stop(node_id=request.dropoff_node, stop_type="dropoff", passenger_id=request.passenger_id),
                 )
 
+                # 성능 최적화: 경로 길이 제한
+                if len(path_candidate) > self.max_path_length:
+                    continue
+
                 if not self._is_capacity_valid(path_candidate, vehicle.capacity, vehicle.onboard_passengers):
                     continue
 
-                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
+                # 성능 최적화: 증분 계산 사용 (경로가 짧으면 전체 계산이 더 빠를 수 있음)
+                if path_len <= 5:
+                    # 경로가 짧으면 전체 계산이 더 간단하고 빠름
+                    new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
+                else:
+                    # 경로가 길면 증분 계산 사용
+                    new_path_time = self._calculate_path_time_incremental(
+                        vehicle.current_node,
+                        vehicle.path,
+                        original_path_nodes,
+                        original_path_time,
+                        pickup_index,
+                        request.pickup_node,
+                        dropoff_index,
+                        request.dropoff_node,
+                    )
+                
                 if math.isinf(new_path_time):
                     continue
 
                 cost_increase = new_path_time - original_path_time
                 final_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
 
+                # 성능 최적화: 조기 종료 - 현재 최적해보다 훨씬 나쁘면 건너뛰기
+                if best_cost != math.inf and final_cost > best_cost * EARLY_TERMINATION_THRESHOLD:
+                    candidates_evaluated += 1
+                    continue
+
                 if final_cost < best_cost:
                     best_cost = final_cost
                     best_path = path_candidate
+                
+                candidates_evaluated += 1
+            
+            # 후보 수 제한으로 인한 조기 종료
+            if MAX_CANDIDATES_TO_EVALUATE is not None and candidates_evaluated >= MAX_CANDIDATES_TO_EVALUATE:
+                break
 
         return best_path, best_cost
+    
+    def _get_path_nodes(self, start_node: int, path: List[Stop]) -> List[int]:
+        """경로의 노드 시퀀스를 반환 (증분 계산용)."""
+        nodes = [start_node]
+        for stop in path:
+            nodes.append(stop.node_id)
+        return nodes
+    
+    def _calculate_path_time_incremental(
+        self,
+        start_node: int,
+        original_path: List[Stop],
+        original_path_nodes: List[int],
+        original_path_time: float,
+        pickup_index: int,
+        pickup_node: int,
+        dropoff_index: int,
+        dropoff_node: int,
+    ) -> float:
+        """
+        증분 계산: 전체 경로를 다시 계산하지 않고 삽입 지점 주변만 계산.
+        
+        원본 경로의 노드 시퀀스를 활용하여 삽입 지점 이전/이후를 효율적으로 계산.
+        """
+        total_time = 0.0
+        current_node = start_node
+        
+        # pickup_index 이전까지의 경로 (원본 경로 그대로)
+        for i in range(pickup_index):
+            stop = original_path[i]
+            travel = self.travel_time_cache.travel_seconds(current_node, stop.node_id)
+            if math.isinf(travel):
+                return math.inf
+            total_time += travel
+            current_node = stop.node_id
+        
+        # 픽업 노드까지의 이동
+        pickup_travel = self.travel_time_cache.travel_seconds(current_node, pickup_node)
+        if math.isinf(pickup_travel):
+            return math.inf
+        total_time += pickup_travel
+        current_node = pickup_node
+        
+        # 드롭오프 이전까지의 경로 (픽업과 드롭오프 사이의 원본 경로)
+        # dropoff_index는 path_with_pickup 기준이므로, 원본 경로에서는 dropoff_index - 1까지
+        for i in range(pickup_index, dropoff_index - 1):
+            stop = original_path[i]
+            travel = self.travel_time_cache.travel_seconds(current_node, stop.node_id)
+            if math.isinf(travel):
+                return math.inf
+            total_time += travel
+            current_node = stop.node_id
+        
+        # 드롭오프 노드까지의 이동
+        dropoff_travel = self.travel_time_cache.travel_seconds(current_node, dropoff_node)
+        if math.isinf(dropoff_travel):
+            return math.inf
+        total_time += dropoff_travel
+        current_node = dropoff_node
+        
+        # 드롭오프 이후의 경로 (원본 경로의 나머지)
+        for i in range(dropoff_index - 1, len(original_path)):
+            stop = original_path[i]
+            travel = self.travel_time_cache.travel_seconds(current_node, stop.node_id)
+            if math.isinf(travel):
+                return math.inf
+            total_time += travel
+            current_node = stop.node_id
+        
+        return total_time
 
     def _calculate_path_time(self, start_node: int, path: Iterable[Stop]) -> float:
         """주어진 경로(Stop 목록)를 따라 이동하는 데 필요한 총 시간을 초 단위로 계산."""

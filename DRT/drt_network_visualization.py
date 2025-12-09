@@ -415,7 +415,7 @@ class NetworkAssignmentDemo:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="네트워크 기반 DRT 배차 경로 시각화 데모")
-    parser.add_argument("--requests", type=int, default=5, help="무작위 요청 개수 (기본 5)")
+    parser.add_argument("--requests", type=int, default=10, help="무작위 요청 개수 (기본 5)")
     parser.add_argument("--save", type=str, default=None, help="PNG 저장 경로 (미지정 시 화면 표시)")
     parser.add_argument("--vehicles", type=int, default=2, help="데모용 차량 수 (기본 2)")
     parser.add_argument("--capacity", type=int, default=4, help="차량 용량 (기본 4)")
