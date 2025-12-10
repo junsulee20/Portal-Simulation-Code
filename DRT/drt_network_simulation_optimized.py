@@ -921,7 +921,7 @@ def main() -> None:
     # 차량별 이동경로 출력
     if events:
         print("=" * 70)
-        print("🚗 차량별 이동경로")
+        print("🚗 차량별 이동경로 (실제 경로 순서)")
         print("=" * 70)
         
         # 요청 번호 매핑 생성 (P1, D1 등)
@@ -941,7 +941,7 @@ def main() -> None:
         for vehicle_id in vehicle_events:
             vehicle_events[vehicle_id].sort(key=lambda e: e.request_time)
         
-        # 차량별 경로 출력
+        # 차량별 경로 출력 (실제 경로 순서 반영)
         for vehicle_id in sorted(vehicle_events.keys()):
             vehicle_event_list = vehicle_events[vehicle_id]
             
@@ -952,31 +952,60 @@ def main() -> None:
             
             depot_node = initial.initial_node
             
-            # 경로 구성: 차고지 -> 픽업/드롭오프 순서대로
+            # 실제 경로 구성: 마지막 이벤트의 new_path가 최종 경로를 포함
+            # 마지막 이벤트의 경로가 모든 이전 경로를 포함하므로 이를 사용
+            if not vehicle_event_list:
+                continue
+            
+            # 마지막 이벤트의 경로가 최종 경로
+            final_event = vehicle_event_list[-1]
+            final_path = final_event.new_path
+            
+            # 경로 구성: 차고지 -> 실제 경로 순서대로
             route_parts = []
             
-            # 차고지 추가 (00:00)
-            route_parts.append(f"차고지(00:00)")
+            # 차고지 추가 (00:00:00)
+            route_parts.append(f"차고지(00:00:00)")
             
-            # 각 이벤트의 픽업과 드롭오프를 시간 순서대로 추가
+            # Stop별 시간 계산을 위한 매핑
+            stop_times: Dict[Tuple[str, str], float] = {}  # (stop_type, passenger_id) -> time
+            
+            # 각 이벤트의 픽업/드롭오프 시간을 기록
             for event in vehicle_event_list:
-                req_num = request_number_map.get(event.request.passenger_id, 0)
+                req_id = event.request.passenger_id
+                stop_times[("pickup", req_id)] = event.pickup_time
+                stop_times[("dropoff", req_id)] = event.dropoff_time
+            
+            # Stop과 시간 정보를 함께 저장하고 시간 순서대로 정렬
+            stops_with_time: List[Tuple[Stop, float, int]] = []  # (stop, time, req_num)
+            for stop in final_path:
+                req_num = request_number_map.get(stop.passenger_id, 0)
+                stop_time = stop_times.get((stop.stop_type, stop.passenger_id), 0.0)
+                stops_with_time.append((stop, stop_time, req_num))
+            
+            # 시간 순서대로 정렬
+            stops_with_time.sort(key=lambda x: x[1])  # stop_time 기준으로 정렬
+            
+            # 시간 순서대로 출력
+            for stop, stop_time, req_num in stops_with_time:
+                # 시간 (시간:분:초 형식)
+                time_hours = int(stop_time // 3600)
+                time_minutes = int((stop_time % 3600) // 60)
+                time_seconds = int(stop_time % 60)
                 
-                # 픽업 시간 (분:초 형식)
-                pickup_minutes = int(event.pickup_time // 60)
-                pickup_seconds = int(event.pickup_time % 60)
-                route_parts.append(f"P{req_num}({pickup_minutes:02d}:{pickup_seconds:02d})")
-                
-                # 드롭오프 시간 (분:초 형식)
-                dropoff_minutes = int(event.dropoff_time // 60)
-                dropoff_seconds = int(event.dropoff_time % 60)
-                route_parts.append(f"D{req_num}({dropoff_minutes:02d}:{dropoff_seconds:02d})")
+                if stop.stop_type == "pickup":
+                    route_parts.append(f"P{req_num}({time_hours:02d}:{time_minutes:02d}:{time_seconds:02d})")
+                else:
+                    route_parts.append(f"D{req_num}({time_hours:02d}:{time_minutes:02d}:{time_seconds:02d})")
             
             # 경로 출력
             route_str = " -> ".join(route_parts)
             print(f"\n차량 {vehicle_id}:")
             print(f"  {route_str}")
         
+        # [참고] 메시지는 모든 차량 경로 출력 후 한 번만 출력
+        print(f"\n  [참고] 이 경로는 모든 요청이 배정된 후의 최종 경로입니다.")
+        print(f"  [참고] 각 요청 배정 시 출력된 '신규 경로'는 그 시점의 경로이며, 이후 다른 요청이 배정되면서 변경될 수 있습니다.")
         print("\n" + "=" * 70)
         print()
     

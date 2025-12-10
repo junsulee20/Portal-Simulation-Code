@@ -25,7 +25,7 @@ W_COST_INCREASE = 0.7
 W_PATH_LENGTH = 0.3
 
 # 성능 최적화 설정
-MAX_PATH_LENGTH = 25  # 경로 길이 제한 (stop 개수) - 더 엄격하게 설정하여 계산량 감소
+MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
 MAX_CANDIDATES_TO_EVALUATE = 80  # 평가할 최대 후보 수 (무제한이면 None) - 더 엄격하게 설정
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
 
