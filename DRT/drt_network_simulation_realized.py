@@ -27,7 +27,17 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import networkx as nx
 
-from drt_network_assignment_optimized import (
+# from drt_network_assignment_optimized import (
+#     DRTAssignmentEngine,
+#     NetworkTravelTimeCache,
+#     PassengerRequest,
+#     Stop,
+#     VehicleState,
+#     load_network_graph,
+#     select_random_node,
+# )
+
+from drt_network_assignment_optimized_sampling import (
     DRTAssignmentEngine,
     NetworkTravelTimeCache,
     PassengerRequest,
@@ -41,7 +51,7 @@ from drt_network_assignment_optimized import (
 # ================================================================================
 # 시뮬레이션 설정
 # ================================================================================
-NUM_DEMANDS = 20  # 디멘드 개수
+NUM_DEMANDS = 40  # 디멘드 개수
 NUM_VEHICLES = 5  # 차량 수
 VEHICLE_CAPACITY = 14  # 차량 용량
 REQUEST_INTERVAL_SECONDS = 30  # 각 디멘드 요청 간격 (초)
