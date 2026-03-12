@@ -55,7 +55,7 @@ NUM_DEMANDS = 40  # 디멘드 개수
 NUM_VEHICLES = 5  # 차량 수
 VEHICLE_CAPACITY = 14  # 차량 용량
 REQUEST_INTERVAL_SECONDS = 30  # 각 디멘드 요청 간격 (초)
-MAX_AWAIT_TIME_SECONDS = 60000  # 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
+MAX_AWAIT_TIME_SECONDS =600  # 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
 
 # 시드 값 (고정된 디멘드 생성을 위해)
 DEMAND_SEED = 42

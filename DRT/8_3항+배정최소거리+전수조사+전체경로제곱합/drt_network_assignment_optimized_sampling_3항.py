@@ -1,9 +1,9 @@
 """
-실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (차량별 균등 샘플링 버전).
+실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (전수 조사 버전).
 
 성능 최적화:
     - 경로 길이 제한: MAX_PATH_LENGTH=50로 제한하여 계산량 감소
-    - 차량별 균등 샘플링: 각 차량에서 균등하게 후보를 선택하여 평가
+    - 전수 조사: 샘플링 없이 모든 삽입 후보를 평가하여 수학적으로 동일한 최적값 보장
     - 조기 종료: 현재 최적해의 1.3배 이상인 후보는 즉시 건너뛰기
     - 증분 계산: 경로가 길 때 전체 경로를 다시 계산하지 않고 증가분만 계산
     - 적응형 계산: 경로가 짧으면 전체 계산, 길면 증분 계산 사용
@@ -23,12 +23,13 @@ import networkx as nx
 # 비용 함수 가중치
 W_COST_INCREASE = 0.5  # w1: 경로 비용 증가량
 W_PATH_LENGTH = 0.3    # w2: 신규 경로 전체 시간
-W_WAIT_TIME = 0.2      # w3: 대기시간 (wait_assign + wait_pickup)
+W_WAIT_TIME = 0.2     # w3: 대기시간 (wait_assign + wait_pickup)
 
-# 성능 최적화 설정
+# 성능 최적화 및 배정 조건 설정
 MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
-MAX_CANDIDATES_PER_VEHICLE = 20  # 차량당 최대 평가 후보 수 (균등 샘플링)
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
+
+MAX_DISPATCH_ETA_SECONDS = 100000  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -68,6 +69,11 @@ class VehicleState:
     capacity: int
     onboard_passengers: int = 0
     path: List[Stop] = field(default_factory=list)
+    depot_node: Optional[int] = None  # 차고지(초기 출발지) 노드 추가
+
+    def __post_init__(self) -> None:
+        if self.depot_node is None:
+            self.depot_node = self.current_node
 
     def clone_path(self) -> List[Stop]:
         """경로 리스트를 깊은 복사(Stop은 불변 객체로 취급)하여 반환."""
@@ -121,20 +127,21 @@ class Candidate:
 
 class DRTAssignmentEngine:
     """
-    DRT 1:다수 배정 알고리즘을 실제 네트워크에 적용한 엔진 (차량별 균등 샘플링 버전).
+    DRT 1:다수 배정 알고리즘을 실제 네트워크에 적용한 엔진 (전수 조사 버전).
 
     차량별 경로를 시뮬레이션하지 않고도 신규 요청을 어느 차량에 배치할지 결정할 수 있습니다.
     
     성능 최적화:
         - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 경로는 배제
-        - 차량별 균등 샘플링: 각 차량에서 균등하게 후보를 선택하여 평가
+        - 전수 조사: 모든 삽입 후보를 평가하여 수학적 최적해 보장
         - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
     """
 
-    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH) -> None:
+    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH, max_dispatch_eta: float = MAX_DISPATCH_ETA_SECONDS) -> None:
         self.graph = graph
         self.travel_time_cache = NetworkTravelTimeCache(graph)
         self.max_path_length = max_path_length
+        self.max_dispatch_eta = max_dispatch_eta
 
     # 공개 API ------------------------------------------------------------------------
     def assign_request(
@@ -146,7 +153,7 @@ class DRTAssignmentEngine:
         """
         신규 승객 요청을 받아 가장 적합한 차량과 업데이트된 경로, 계산된 최종 비용을 반환.
 
-        차량별 균등 샘플링: 각 차량에서 균등하게 후보를 선택하여 평가합니다.
+        전수 조사: 각 차량의 모든 삽입 후보를 평가하여 수학적으로 동일한 최적값을 반환합니다.
 
         인수:
             vehicles     : 평가할 차량 목록
@@ -166,6 +173,13 @@ class DRTAssignmentEngine:
         # wait_assign: 요청(request_time) → 배정(assigned_time)
         wait_assign = max(0.0, assigned_time - request.request_time)
 
+        # 전체 차량(5대)의 기존 누적 경로 시간의 제곱합 계산
+        total_original_system_path_time_sq = 0.0
+        for v in vehicles:
+            v_time = self._calculate_path_time(v.depot_node, v.path)
+            if not math.isinf(v_time):
+                total_original_system_path_time_sq += v_time ** 2
+
         # 각 차량별로 후보를 수집하고 샘플링
         for vehicle in vehicles:
             if vehicle.onboard_passengers >= vehicle.capacity:
@@ -175,16 +189,21 @@ class DRTAssignmentEngine:
             if len(vehicle.path) > self.max_path_length:
                 continue
 
-            original_path_time = self._calculate_path_time(vehicle.current_node, vehicle.path)
+            # 차고지(depot)에서부터의 전체 경로 총 누적 운행 시간 계산
+            original_path_time = self._calculate_path_time(vehicle.depot_node, vehicle.path)
             if math.isinf(original_path_time):
                 # 현재 경로조차 유효하게 계산되지 않으면 해당 차량은 배제
                 continue
 
             # 차량별 균등 샘플링: 모든 후보를 생성하고 샘플링
-            candidate_path, candidate_cost, pickup_eta = self._find_best_insertion_with_sampling(
-                vehicle, request, original_path_time
+            candidate_path, candidate_cost, pickup_eta = self._find_best_insertion_full(
+                vehicle, request, original_path_time, total_original_system_path_time_sq
             )
             if candidate_path is None:
+                continue
+
+            # 최소 조건: 픽업 ETA가 허용된 최대 픽업 시간(최대 배정 거리) 이내일 때만 배정 허용
+            if pickup_eta > self.max_dispatch_eta:
                 continue
 
             # wait_pickup: 배정(assigned_time) → 탑승/픽업 ETA
@@ -208,14 +227,15 @@ class DRTAssignmentEngine:
         return best_vehicle, best_new_path, min_final_cost
 
     # 내부 메서드 ---------------------------------------------------------------------
-    def _find_best_insertion_with_sampling(
+    def _find_best_insertion_full(
         self,
         vehicle: VehicleState,
         request: PassengerRequest,
         original_path_time: float,
+        total_original_system_path_time_sq: float,
     ) -> Tuple[Optional[List[Stop]], float, float]:
         """
-        주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색 (차량별 균등 샘플링).
+        주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색 (전수 조사).
 
         반환값:
             (최적 경로 | None,
@@ -224,7 +244,7 @@ class DRTAssignmentEngine:
 
         성능 최적화:
             - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 후보는 배제
-            - 차량별 균등 샘플링: 모든 후보를 생성한 후 랜덤 샘플링
+            - 전수 조사: 모든 후보를 평가하여 수학적 최적해 보장
             - 증분 계산: 전체 경로를 다시 계산하지 않고 증가분만 계산
             - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
         """
@@ -236,7 +256,8 @@ class DRTAssignmentEngine:
             return None, math.inf, math.inf
 
         # 성능 최적화: 원본 경로의 중간 노드 위치를 미리 계산 (증분 계산용)
-        original_path_nodes = self._get_path_nodes(vehicle.current_node, vehicle.path)
+        # 누적 운행 시간 계산을 위해 차고지(depot_node)를 시작점으로 사용
+        original_path_nodes = self._get_path_nodes(vehicle.depot_node, vehicle.path)
         
         # 모든 가능한 후보 조합 생성
         all_candidates: List[Candidate] = []
@@ -244,13 +265,10 @@ class DRTAssignmentEngine:
             for dropoff_index in range(pickup_index + 1, path_len + 2):  # path_with_pickup 길이는 path_len + 1
                 all_candidates.append(Candidate(pickup_index=pickup_index, dropoff_index=dropoff_index))
         
-        # 차량별 균등 샘플링: MAX_CANDIDATES_PER_VEHICLE개만 선택
-        if len(all_candidates) > MAX_CANDIDATES_PER_VEHICLE:
-            sampled_candidates = random.sample(all_candidates, MAX_CANDIDATES_PER_VEHICLE)
-        else:
-            sampled_candidates = all_candidates
+        # 전수 조사: 샘플링 없이 모든 후보 평가 (MAX_PATH_LENGTH=50 제한으로 인해 계산량 관리됨)
+        sampled_candidates = all_candidates
         
-        # 샘플링된 후보들을 평가
+        # 모든 후보를 평가
         best_path: Optional[List[Stop]] = None
         best_partial_cost: float = math.inf   # w1*cost_increase + w2*new_path_time 항
         best_pickup_eta: float = math.inf
@@ -277,12 +295,12 @@ class DRTAssignmentEngine:
 
             # 성능 최적화: 증분 계산 사용 (경로가 짧으면 전체 계산이 더 빠를 수 있음)
             if path_len <= 5:
-                # 경로가 짧으면 전체 계산이 더 간단하고 빠름
-                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
+                # 차고지(depot_node)에서부터 전체 누적 운행 시간 다시 계산
+                new_path_time = self._calculate_path_time(vehicle.depot_node, path_candidate)
             else:
-                # 경로가 길면 증분 계산 사용
+                # 경로가 길면 증분 계산 사용 (차고지 출발 기준)
                 new_path_time = self._calculate_path_time_incremental(
-                    vehicle.current_node,
+                    vehicle.depot_node,
                     vehicle.path,
                     original_path_nodes,
                     original_path_time,
@@ -296,12 +314,16 @@ class DRTAssignmentEngine:
                 continue
 
             cost_increase = new_path_time - original_path_time
-            # w1, w2 항만 계산 (w3 항은 assign_request에서 추가)
-            partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
+            
+            # 차량 전체(5대) 총 경로 소요 시간의 제곱합 계산
+            system_new_path_time_sq = total_original_system_path_time_sq - (original_path_time ** 2) + (new_path_time ** 2)
 
-            # 픽업 ETA: 차량 현재 위치 → 픽업까지 경유하는 스톱들을 따라 이동한 시간
+            # w1, w2 항만 계산 (w3 항은 assign_request에서 추가)
+            partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * system_new_path_time_sq)
+
+            # 픽업 ETA: 차고지(depot) → 픽업까지 경유하는 스톱들을 따라 이동한 시간
             pickup_eta = self._calculate_pickup_eta(
-                vehicle.current_node, vehicle.path, candidate.pickup_index, request.pickup_node
+                vehicle.depot_node, vehicle.path, candidate.pickup_index, request.pickup_node
             )
 
             # 성능 최적화: 조기 종료 - 현재 최적해보다 훨씬 나쁘면 건너뛰기
@@ -323,10 +345,7 @@ class DRTAssignmentEngine:
         pickup_node: int,
     ) -> float:
         """
-        픽업 ETA 계산: 차량 현재 위치 → 삽입된 픽업 노드까지 이동하는 데 걸리는 시간(초).
-
-        픽업 전까지 기존 경로의 스톱(0 ~ pickup_index-1)을 순서대로 경유한 뒤
-        픽업 노드에 도달하는 총 소요 시간을 반환합니다.
+        픽업 노드까지 도달하는 데 걸리는 시간(초).
         """
         total_time = 0.0
         current_node = start_node

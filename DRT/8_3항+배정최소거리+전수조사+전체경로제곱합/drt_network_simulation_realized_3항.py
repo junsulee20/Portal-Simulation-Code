@@ -55,7 +55,7 @@ NUM_DEMANDS = 40  # 디멘드 개수
 NUM_VEHICLES = 5  # 차량 수
 VEHICLE_CAPACITY = 14  # 차량 용량
 REQUEST_INTERVAL_SECONDS = 30  # 각 디멘드 요청 간격 (초)
-MAX_AWAIT_TIME_SECONDS = 60000  # 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
+MAX_AWAIT_TIME_SECONDS =600  # 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
 
 # 시드 값 (고정된 디멘드 생성을 위해)
 DEMAND_SEED = 42
@@ -838,12 +838,22 @@ class RealizedDRTSimulation:
         # request.request_time은 실제로 승객이 요청한 과거 시각일 수 있음
         waiting_time = pickup_time - request.request_time
 
-        original_path_time = self.engine._calculate_path_time(start_node, previous_path)
-        new_path_time = self.engine._calculate_path_time(start_node, new_path)
+        # 기존 차량의 경로 변경에 따른 시간 증분 계산
+        original_path_time = self.engine._calculate_path_time(assigned_vehicle.depot_node, previous_path)
+        single_new_path_time = self.engine._calculate_path_time(assigned_vehicle.depot_node, new_path)
         if math.isinf(original_path_time):
             original_path_time = 0.0
 
-        cost_increase = max(0.0, new_path_time - original_path_time)
+        cost_increase = max(0.0, single_new_path_time - original_path_time)
+        
+        # 전체 5대 차량 총 경로 시간의 제곱합을 new_path_time으로 재정의
+        total_original_system_path_time_sq = 0.0
+        for v in self.vehicles:
+            v_time = self.engine._calculate_path_time(v.depot_node, v.path)
+            if not math.isinf(v_time):
+                total_original_system_path_time_sq += v_time ** 2
+                
+        new_path_time = total_original_system_path_time_sq - (original_path_time ** 2) + (single_new_path_time ** 2)
         wait_assign = max(0.0, assignment_time - request.request_time)
         wait_pickup = max(0.0, pickup_time - assignment_time)
         total_wait = wait_assign + wait_pickup

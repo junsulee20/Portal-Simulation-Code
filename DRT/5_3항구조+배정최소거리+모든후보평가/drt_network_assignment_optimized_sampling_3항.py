@@ -1,9 +1,9 @@
 """
-실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (차량별 균등 샘플링 버전).
+실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (전수 조사 버전).
 
 성능 최적화:
     - 경로 길이 제한: MAX_PATH_LENGTH=50로 제한하여 계산량 감소
-    - 차량별 균등 샘플링: 각 차량에서 균등하게 후보를 선택하여 평가
+    - 전수 조사: 샘플링 없이 모든 삽입 후보를 평가하여 수학적으로 동일한 최적값 보장
     - 조기 종료: 현재 최적해의 1.3배 이상인 후보는 즉시 건너뛰기
     - 증분 계산: 경로가 길 때 전체 경로를 다시 계산하지 않고 증가분만 계산
     - 적응형 계산: 경로가 짧으면 전체 계산, 길면 증분 계산 사용
@@ -25,10 +25,11 @@ W_COST_INCREASE = 0.5  # w1: 경로 비용 증가량
 W_PATH_LENGTH = 0.3    # w2: 신규 경로 전체 시간
 W_WAIT_TIME = 0.2      # w3: 대기시간 (wait_assign + wait_pickup)
 
-# 성능 최적화 설정
+# 성능 최적화 및 배정 조건 설정
 MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
-MAX_CANDIDATES_PER_VEHICLE = 20  # 차량당 최대 평가 후보 수 (균등 샘플링)
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
+
+MAX_DISPATCH_ETA_SECONDS = 100000  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -121,20 +122,21 @@ class Candidate:
 
 class DRTAssignmentEngine:
     """
-    DRT 1:다수 배정 알고리즘을 실제 네트워크에 적용한 엔진 (차량별 균등 샘플링 버전).
+    DRT 1:다수 배정 알고리즘을 실제 네트워크에 적용한 엔진 (전수 조사 버전).
 
     차량별 경로를 시뮬레이션하지 않고도 신규 요청을 어느 차량에 배치할지 결정할 수 있습니다.
     
     성능 최적화:
         - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 경로는 배제
-        - 차량별 균등 샘플링: 각 차량에서 균등하게 후보를 선택하여 평가
+        - 전수 조사: 모든 삽입 후보를 평가하여 수학적 최적해 보장
         - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
     """
 
-    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH) -> None:
+    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH, max_dispatch_eta: float = MAX_DISPATCH_ETA_SECONDS) -> None:
         self.graph = graph
         self.travel_time_cache = NetworkTravelTimeCache(graph)
         self.max_path_length = max_path_length
+        self.max_dispatch_eta = max_dispatch_eta
 
     # 공개 API ------------------------------------------------------------------------
     def assign_request(
@@ -146,7 +148,7 @@ class DRTAssignmentEngine:
         """
         신규 승객 요청을 받아 가장 적합한 차량과 업데이트된 경로, 계산된 최종 비용을 반환.
 
-        차량별 균등 샘플링: 각 차량에서 균등하게 후보를 선택하여 평가합니다.
+        전수 조사: 각 차량의 모든 삽입 후보를 평가하여 수학적으로 동일한 최적값을 반환합니다.
 
         인수:
             vehicles     : 평가할 차량 목록
@@ -181,10 +183,14 @@ class DRTAssignmentEngine:
                 continue
 
             # 차량별 균등 샘플링: 모든 후보를 생성하고 샘플링
-            candidate_path, candidate_cost, pickup_eta = self._find_best_insertion_with_sampling(
+            candidate_path, candidate_cost, pickup_eta = self._find_best_insertion_full(
                 vehicle, request, original_path_time
             )
             if candidate_path is None:
+                continue
+
+            # 최소 조건: 픽업 ETA가 허용된 최대 픽업 시간(최대 배정 거리) 이내일 때만 배정 허용
+            if pickup_eta > self.max_dispatch_eta:
                 continue
 
             # wait_pickup: 배정(assigned_time) → 탑승/픽업 ETA
@@ -208,14 +214,14 @@ class DRTAssignmentEngine:
         return best_vehicle, best_new_path, min_final_cost
 
     # 내부 메서드 ---------------------------------------------------------------------
-    def _find_best_insertion_with_sampling(
+    def _find_best_insertion_full(
         self,
         vehicle: VehicleState,
         request: PassengerRequest,
         original_path_time: float,
     ) -> Tuple[Optional[List[Stop]], float, float]:
         """
-        주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색 (차량별 균등 샘플링).
+        주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색 (전수 조사).
 
         반환값:
             (최적 경로 | None,
@@ -224,7 +230,7 @@ class DRTAssignmentEngine:
 
         성능 최적화:
             - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 후보는 배제
-            - 차량별 균등 샘플링: 모든 후보를 생성한 후 랜덤 샘플링
+            - 전수 조사: 모든 후보를 평가하여 수학적 최적해 보장
             - 증분 계산: 전체 경로를 다시 계산하지 않고 증가분만 계산
             - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
         """
@@ -244,13 +250,10 @@ class DRTAssignmentEngine:
             for dropoff_index in range(pickup_index + 1, path_len + 2):  # path_with_pickup 길이는 path_len + 1
                 all_candidates.append(Candidate(pickup_index=pickup_index, dropoff_index=dropoff_index))
         
-        # 차량별 균등 샘플링: MAX_CANDIDATES_PER_VEHICLE개만 선택
-        if len(all_candidates) > MAX_CANDIDATES_PER_VEHICLE:
-            sampled_candidates = random.sample(all_candidates, MAX_CANDIDATES_PER_VEHICLE)
-        else:
-            sampled_candidates = all_candidates
+        # 전수 조사: 샘플링 없이 모든 후보 평가 (MAX_PATH_LENGTH=50 제한으로 인해 계산량 관리됨)
+        sampled_candidates = all_candidates
         
-        # 샘플링된 후보들을 평가
+        # 모든 후보를 평가
         best_path: Optional[List[Stop]] = None
         best_partial_cost: float = math.inf   # w1*cost_increase + w2*new_path_time 항
         best_pickup_eta: float = math.inf

@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import pickle
 import random
+random.seed(42)  # 전역 랜덤 시드 고정
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -25,10 +26,12 @@ W_COST_INCREASE = 0.5  # w1: 경로 비용 증가량
 W_PATH_LENGTH = 0.3    # w2: 신규 경로 전체 시간
 W_WAIT_TIME = 0.2      # w3: 대기시간 (wait_assign + wait_pickup)
 
-# 성능 최적화 설정
+# 성능 최적화 및 배정 조건 설정
 MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
 MAX_CANDIDATES_PER_VEHICLE = 20  # 차량당 최대 평가 후보 수 (균등 샘플링)
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
+
+MAX_DISPATCH_ETA_SECONDS = 900  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -131,10 +134,11 @@ class DRTAssignmentEngine:
         - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
     """
 
-    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH) -> None:
+    def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH, max_dispatch_eta: float = MAX_DISPATCH_ETA_SECONDS) -> None:
         self.graph = graph
         self.travel_time_cache = NetworkTravelTimeCache(graph)
         self.max_path_length = max_path_length
+        self.max_dispatch_eta = max_dispatch_eta
 
     # 공개 API ------------------------------------------------------------------------
     def assign_request(
@@ -185,6 +189,10 @@ class DRTAssignmentEngine:
                 vehicle, request, original_path_time
             )
             if candidate_path is None:
+                continue
+
+            # 최소 조건: 픽업 ETA가 허용된 최대 픽업 시간(최대 배정 거리) 이내일 때만 배정 허용
+            if pickup_eta > self.max_dispatch_eta:
                 continue
 
             # wait_pickup: 배정(assigned_time) → 탑승/픽업 ETA
