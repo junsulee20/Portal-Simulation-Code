@@ -29,7 +29,7 @@ W_WAIT_TIME = 0.2      # w3: 대기시간 (wait_assign + wait_pickup)
 MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
 
-MAX_DISPATCH_ETA_SECONDS = 50  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
+MAX_DISPATCH_ETA_SECONDS = 100000  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -73,6 +73,7 @@ class VehicleState:
     onboard_passengers: int = 0
     path: List[Stop] = field(default_factory=list)
     depot_node: Optional[int] = None  # 차고지(초기 출발지) 노드 추가
+    schedule_start_time: float = 0.0  # [동적이동] 현재 path가 할당된 시각 (초). 차량 위치 계산의 기준.
 
     def __post_init__(self) -> None:
         if self.depot_node is None:

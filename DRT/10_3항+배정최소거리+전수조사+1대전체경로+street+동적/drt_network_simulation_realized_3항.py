@@ -39,6 +39,8 @@ import networkx as nx
 
 from drt_network_assignment_optimized_sampling_3항 import (
     DRTAssignmentEngine,
+    MAX_DISPATCH_ETA_SECONDS,
+    MAX_PATH_LENGTH,
     NetworkTravelTimeCache,
     PassengerRequest,
     Stop,
@@ -57,7 +59,7 @@ NUM_VEHICLES = 5  # 차량 수
 VEHICLE_CAPACITY = 14  # 차량 용량
 REQUEST_INTERVAL_SECONDS = 30  # 각 디멘드 요청 간격 (초)
 STREET_HAIL_INTERVAL_SECONDS = 60 # 추가: 길거리 디멘드 요청 간격 (초)
-MAX_AWAIT_TIME_SECONDS = 6000  # 일반 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
+MAX_AWAIT_TIME_SECONDS = 600000  # 일반 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
 STREET_HAIL_QUEUE_TIMEOUT_SECONDS = 300 # 추가: 길거리 대기열(큐) 최대 허용 시간 (초)
 STREET_HAIL_TRAVEL_TIME_INCREASE_LIMIT = 300 # 추가: 기존 통행시간 증가 가드레일 (초)
 
@@ -534,6 +536,64 @@ def compute_percentile(data: List[float], p: float) -> float:
 
 
 # --------------------------------------------------------------------------------------
+# 동적 차량 이동 함수
+# --------------------------------------------------------------------------------------
+
+
+def advance_vehicle_position(
+    vehicle: VehicleState,
+    current_time: float,
+    travel_time_cache: NetworkTravelTimeCache,
+) -> None:
+    """
+    현재 시각(current_time)을 기준으로 차량의 위치를 동적으로 갱신합니다.
+
+    차량이 현재 경로(path)를 따라 이동한다고 가정하고,
+    schedule_start_time 이후 경과한 시간 동안 완료했을 Stop들을 path에서 제거하고
+    current_node를 마지막으로 도달한 Stop 노드로 업데이트합니다.
+
+    Args:
+        vehicle: 상태를 갱신할 차량 객체 (in-place 수정)
+        current_time: 현재 시뮬레이션 시각 (초)
+        travel_time_cache: 노드 간 이동 시간 캐시
+    """
+    if not vehicle.path:
+        # 경로가 없으면 차량은 현재 위치에 정차 중 → 갱신 불필요
+        return
+
+    # 현재 경로가 할당된 이후 경과한 시간
+    elapsed = current_time - vehicle.schedule_start_time
+    if elapsed <= 0:
+        return
+
+    # current_node에서 시작하여 경과 시간만큼 각 Stop 방문 시도
+    remaining_time = elapsed
+    new_current_node = vehicle.current_node
+    completed_stops = 0
+
+    for stop in vehicle.path:
+        travel = travel_time_cache.travel_seconds(new_current_node, stop.node_id)
+        if math.isinf(travel):
+            # 경로 계산 불가 → 이 Stop 이후는 이동 중단
+            break
+        if remaining_time >= travel:
+            # 이 Stop에 도달 완료
+            remaining_time -= travel
+            new_current_node = stop.node_id
+            completed_stops += 1
+        else:
+            # 아직 이 Stop에 도달하지 못함 → 이동 중단
+            break
+
+    # 완료된 Stop을 path에서 제거하고 current_node 갱신
+    if completed_stops > 0:
+        vehicle.path = vehicle.path[completed_stops:]
+        vehicle.current_node = new_current_node
+        # 새 위치부터 새 경로 시작이므로 schedule_start_time 갱신
+        vehicle.schedule_start_time = current_time - remaining_time
+
+
+# --------------------------------------------------------------------------------------
 # 시각화 루틴 (최종 결과만 그리기) - 성능 최적화 버전
 # --------------------------------------------------------------------------------------
 
@@ -814,8 +874,8 @@ class RealizedDRTSimulation:
         self.graph = load_network_graph()
         self.engine = DRTAssignmentEngine(
             self.graph,
-            max_path_length=50,
-            max_dispatch_eta=100000,
+            max_path_length=MAX_PATH_LENGTH,  # 배정 코드의 상수를 직접 참조
+            max_dispatch_eta=MAX_DISPATCH_ETA_SECONDS,  # 배정 코드의 상수를 직접 참조
             street_hail_travel_time_increase_limit=STREET_HAIL_TRAVEL_TIME_INCREASE_LIMIT
         )
         self.num_vehicles = num_vehicles
@@ -949,6 +1009,7 @@ class RealizedDRTSimulation:
         )
         
         assigned_vehicle.path = new_path
+        assigned_vehicle.schedule_start_time = current_time  # [동적이동] 새 경로 할당 시각 기록
         
         # 터미널 출력 (좌표값 및 시간 정보 포함)
         pickup_lon, pickup_lat = node_lonlat(self.graph, request.pickup_node)
@@ -1021,6 +1082,10 @@ class RealizedDRTSimulation:
         
         # 요청 발생 및 처리 루프
         while (schedule_idx < total_demands or pending_requests) and current_time < max_simulation_time:
+            # 0. [동적이동] 매 틱마다 모든 차량의 위치를 현재 시각 기준으로 갱신
+            for vehicle in self.vehicles:
+                advance_vehicle_position(vehicle, current_time, self.engine.travel_time_cache)
+
             # 1. 이번 틱(current_time) 이하에 도착한 요청을 큐에 모두 추가
             while schedule_idx < total_demands and demand_schedule[schedule_idx][0] <= current_time:
                 sched_time, new_demand = demand_schedule[schedule_idx]
