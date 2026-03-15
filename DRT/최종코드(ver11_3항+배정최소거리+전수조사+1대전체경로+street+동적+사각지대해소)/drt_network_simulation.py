@@ -3,11 +3,11 @@
 
 `drt_network_simulation_optimized.py`를 기반으로 하되, 향남신도시 지역으로 제한된 시뮬레이션입니다.
 
-주요 특징:
-    - 향남신도시 지역(향남1~2신도시, 발안리, 구문천리, 제암리 일대)으로 제한
-    - 디멘드 20개, 차량 5대로 설정
-    - 좌표 범위 기반 자동 노드 필터링
-    - 고정된 디멘드와 차량 초기 위치 사용
+주요 기능:
+    - 사각지대 해소용 유휴 라우팅 도입: STAY(대기), DEPOT(차고지 복귀), RANDOM(랜덤 이동) 모드 선택 가능
+    - 동적 차량 이동 처리: 시뮬레이션 시간 흐름에 따라 차량의 현재 위치(current_node)를 실시간 업데이트
+    - 통합 수요 시뮬레이션: 일반 예약 호출과 길거리 즉각 호출(Street Hail)을 동시에 처리
+    - 향남신도시 지역 특화: 특정 좌표 범위 기반 노드 필터링 및 전용 디멘드 생성
 
 성능 최적화:
     - 배정 단계에서 경로 노드 구축 제거 (시각화 단계로 지연)
@@ -37,7 +37,7 @@ import networkx as nx
 #     select_random_node,
 # )
 
-from drt_network_assignment_optimized_sampling_3항 import (
+from drt_network_assignment import (
     DRTAssignmentEngine,
     MAX_DISPATCH_ETA_SECONDS,
     MAX_PATH_LENGTH,
@@ -1127,6 +1127,7 @@ class RealizedDRTSimulation:
             pending_requests = next_pending
             
             # 3. [사각지대 해소] 대기 중인 유휴 차량 라우팅 처리
+            # 차량에 승객이 없고 남은 경로도 없을 때, 설정된 모드에 따라 스스로 이동을 시작하여 사각지대를 해소합니다.
             if IDLE_ROUTING_MODE != "STAY":
                 for vehicle in self.vehicles:
                     # 경로가 비어있고 현재 탑승객이 없는 경우 (완전 유휴 상태)
@@ -1134,27 +1135,27 @@ class RealizedDRTSimulation:
                         dest_node = None
                         
                         if IDLE_ROUTING_MODE == "DEPOT":
-                            # 이미 차고지면 이동 불필요
+                            # 이미 차고지면 이동 불필요, 아니면 차고지로 목적지 설정
                             if vehicle.current_node != vehicle.depot_node:
                                 dest_node = vehicle.depot_node
                         
                         elif IDLE_ROUTING_MODE == "RANDOM":
-                            # 시뮬레이션 일관성을 위해 매번 바꾸지 않고 목적지에 도달했을 때만 새 목적지 설정
-                            # 현재는 경로가 비어있으므로 랜덤 노드 하나 선택
+                            # 사각지대 해소를 위해 네트워크 내 랜덤 노드 하나 선택 후 이동
                             dest_node = random.choice(self.allowed_nodes)
                             while dest_node == vehicle.current_node:
                                 dest_node = random.choice(self.allowed_nodes)
                         
                         if dest_node is not None:
-                            # 유휴 이동용 가상 스톱 생성 (승객 ID를 "IDLE_MOVE"로 설정)
+                            # 유휴 이동용 가상 스톱 생성
+                            # 승객 ID를 "IDLE_MOVE"로 설정하여 배정 엔진에서 예외 처리(빈 경로로 간주)되도록 함
                             idle_stop = Stop(node_id=dest_node, stop_type="dropoff", passenger_id="IDLE_MOVE")
                             vehicle.path = [idle_stop]
-                            vehicle.schedule_start_time = current_time
+                            vehicle.schedule_start_time = current_time # 이동 시작 시점 기록
                             
                             mode_kr = "차고지 복귀" if IDLE_ROUTING_MODE == "DEPOT" else "랜덤 이동"
                             print(f"🏠 [차량 {vehicle.vehicle_id}] 유휴 상태 -> {mode_kr} 시작 (목적지: {dest_node})")
 
-            # 4. 시간 진행
+            # 4. 시간 진행 (1틱 진행)
             current_time += tick_interval
         
         end_time = time.perf_counter()

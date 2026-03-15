@@ -1,5 +1,11 @@
 """
-실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (전수 조사 버전).
+실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 모듈 (전수 조사 버전).
+
+주요 기능:
+    - 3항 목적함수 적용: 경로 증가량, 전체 경로 시간, 승객 대기 시간을 결합하여 최적 차량 선정
+    - 길거리 호출(Street Hail) 지원: 승객의 대기 위치가 차량의 주행 경로상에 있을 때 즉시 배차
+    - 사각지대 해소용 유휴 이동(IDLE_MOVE) 지원: 차량이 차고지나 랜덤 위치로 이동 중일 때 즉시 신규 호출 수락
+    - 동적 이동 환경 최적화: 차량의 현재 할당된 경로와 시점(schedule_start_time)을 고려한 실시간 배정
 
 성능 최적화:
     - 경로 길이 제한: MAX_PATH_LENGTH=50로 제한하여 계산량 감소
@@ -135,10 +141,15 @@ class DRTAssignmentEngine:
 
     차량별 경로를 시뮬레이션하지 않고도 신규 요청을 어느 차량에 배치할지 결정할 수 있습니다.
     
+    주요 로직:
+        - 일반 배정: 차량의 현재 경로 내 모든 삽입 위치를 평가하여 목적함수 최소화
+        - 길거리 배정: 현재 주행 중인 길목에서 승객을 픽업할 수 있는 차량을 우선 검색
+        - 유휴 이동 처리: "IDLE_MOVE" 상태의 차량은 경로가 없는 유휴 상태로 간주하여 즉시 배정
+
     성능 최적화:
         - 경로 길이 제한: MAX_PATH_LENGTH를 초과하는 경로는 배제
         - 전수 조사: 모든 삽입 후보를 평가하여 수학적 최적해 보장
-        - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기
+        - 조기 종료: 최적해보다 나쁜 후보는 즉시 건너뛰기 (EARLY_TERMINATION_THRESHOLD 활용)
     """
 
     def __init__(self, graph: nx.Graph, max_path_length: int = MAX_PATH_LENGTH, max_dispatch_eta: float = MAX_DISPATCH_ETA_SECONDS, street_hail_travel_time_increase_limit: float = 300.0) -> None:
