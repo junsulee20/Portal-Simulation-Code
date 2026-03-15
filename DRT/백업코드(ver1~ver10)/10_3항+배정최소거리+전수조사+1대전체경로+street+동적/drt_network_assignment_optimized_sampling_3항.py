@@ -29,7 +29,7 @@ W_WAIT_TIME = 0.2      # w3: 대기시간 (wait_assign + wait_pickup)
 MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
 
-MAX_DISPATCH_ETA_SECONDS = 100000  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
+MAX_DISPATCH_ETA_SECONDS = 300  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -187,8 +187,8 @@ class DRTAssignmentEngine:
             if len(vehicle.path) > self.max_path_length:
                 continue
 
-            # 차고지(depot)에서부터의 전체 경로 총 누적 운행 시간 계산
-            original_path_time = self._calculate_path_time(vehicle.depot_node, vehicle.path)
+            # 차량의 현재 위치(current_node)에서부터의 전체 경로 총 누적 운행 시간 계산
+            original_path_time = self._calculate_path_time(vehicle.current_node, vehicle.path)
             if math.isinf(original_path_time):
                 # 현재 경로조차 유효하게 계산되지 않으면 해당 차량은 배제
                 continue
@@ -253,9 +253,9 @@ class DRTAssignmentEngine:
             if len(vehicle.path) > self.max_path_length:
                 continue
 
-            # 차량의 현재 위치부터 남은 경로까지 거쳐가는 모든 노드를 시퀀스(경로)로 파악
-            # (차고지 경유 포함, 전체 누적 운행 시간)
-            original_path_time = self._calculate_path_time(vehicle.depot_node, vehicle.path)
+            # 차량의 현재 위치(current_node)부터 남은 경로까지 거쳐가는 모든 노드를 시퀀스(경로)로 파악
+            # (차항지 경유 포함, 전체 누적 운행 시간)
+            original_path_time = self._calculate_path_time(vehicle.current_node, vehicle.path)
             if math.isinf(original_path_time):
                 continue
             
@@ -332,8 +332,8 @@ class DRTAssignmentEngine:
             return None, math.inf, math.inf
 
         # 성능 최적화: 원본 경로의 중간 노드 위치를 미리 계산 (증분 계산용)
-        # 누적 운행 시간 계산을 위해 차고지(depot_node)를 시작점으로 사용
-        original_path_nodes = self._get_path_nodes(vehicle.depot_node, vehicle.path)
+        # 누적 운행 시간 계산을 위해 현재 위치(current_node)를 시작점으로 사용
+        original_path_nodes = self._get_path_nodes(vehicle.current_node, vehicle.path)
         
         # 모든 가능한 후보 조합 생성
         all_candidates: List[Candidate] = []
@@ -371,12 +371,12 @@ class DRTAssignmentEngine:
 
             # 성능 최적화: 증분 계산 사용 (경로가 짧으면 전체 계산이 더 빠를 수 있음)
             if path_len <= 5:
-                # 차고지(depot_node)에서부터 전체 누적 운행 시간 다시 계산
-                new_path_time = self._calculate_path_time(vehicle.depot_node, path_candidate)
+                # 현재 위치(current_node)에서부터 전체 누적 운행 시간 다시 계산
+                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
             else:
-                # 경로가 길면 증분 계산 사용 (차고지 출발 기준)
+                # 경로가 길면 증분 계산 사용 (현재 위치 출발 기준)
                 new_path_time = self._calculate_path_time_incremental(
-                    vehicle.depot_node,
+                    vehicle.current_node,
                     vehicle.path,
                     original_path_nodes,
                     original_path_time,
@@ -393,9 +393,9 @@ class DRTAssignmentEngine:
             # w1, w2 항만 계산 (w3 항은 assign_request에서 추가)
             partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
 
-            # 픽업 ETA: 차고지(depot) → 픽업까지 경유하는 스톱들을 따라 이동한 시간
+            # 픽업 ETA: 현재 위치(current_node) → 픽업까지 경유하는 스톱들을 따라 이동한 시간
             pickup_eta = self._calculate_pickup_eta(
-                vehicle.depot_node, vehicle.path, candidate.pickup_index, request.pickup_node
+                vehicle.current_node, vehicle.path, candidate.pickup_index, request.pickup_node
             )
 
             # 성능 최적화: 조기 종료 - 현재 최적해보다 훨씬 나쁘면 건너뛰기
@@ -424,7 +424,7 @@ class DRTAssignmentEngine:
         if path_len + 2 > self.max_path_length:
             return None, math.inf, math.inf, math.inf, False
 
-        original_path_nodes = self._get_path_nodes(vehicle.depot_node, vehicle.path)
+        original_path_nodes = self._get_path_nodes(vehicle.current_node, vehicle.path)
 
         best_path: Optional[List[Stop]] = None
         best_partial_cost: float = math.inf
@@ -451,10 +451,10 @@ class DRTAssignmentEngine:
                 continue
 
             if path_len <= 5:
-                new_path_time = self._calculate_path_time(vehicle.depot_node, path_candidate)
+                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
             else:
                 new_path_time = self._calculate_path_time_incremental(
-                    vehicle.depot_node, vehicle.path, original_path_nodes, original_path_time,
+                    vehicle.current_node, vehicle.path, original_path_nodes, original_path_time,
                     fixed_pickup_index, request.pickup_node, dropoff_index, request.dropoff_node
                 )
 
@@ -472,7 +472,7 @@ class DRTAssignmentEngine:
             partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
 
             pickup_eta = self._calculate_pickup_eta(
-                vehicle.depot_node, vehicle.path, fixed_pickup_index, request.pickup_node
+                vehicle.current_node, vehicle.path, fixed_pickup_index, request.pickup_node
             )
 
             if best_partial_cost != math.inf and partial_cost > best_partial_cost * EARLY_TERMINATION_THRESHOLD:

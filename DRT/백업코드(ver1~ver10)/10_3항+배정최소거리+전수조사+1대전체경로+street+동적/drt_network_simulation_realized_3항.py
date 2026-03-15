@@ -59,7 +59,7 @@ NUM_VEHICLES = 5  # 차량 수
 VEHICLE_CAPACITY = 14  # 차량 용량
 REQUEST_INTERVAL_SECONDS = 30  # 각 디멘드 요청 간격 (초)
 STREET_HAIL_INTERVAL_SECONDS = 60 # 추가: 길거리 디멘드 요청 간격 (초)
-MAX_AWAIT_TIME_SECONDS = 600000  # 일반 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
+MAX_AWAIT_TIME_SECONDS = 600  # 일반 대기열(큐)에서 승객이 배차를 기다리는 최대 허용 시간 (초, 600초=10분)
 STREET_HAIL_QUEUE_TIMEOUT_SECONDS = 300 # 추가: 길거리 대기열(큐) 최대 허용 시간 (초)
 STREET_HAIL_TRAVEL_TIME_INCREASE_LIMIT = 300 # 추가: 기존 통행시간 증가 가드레일 (초)
 

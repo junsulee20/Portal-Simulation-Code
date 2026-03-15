@@ -29,7 +29,7 @@ W_WAIT_TIME = 0.2      # w3: 대기시간 (wait_assign + wait_pickup)
 MAX_PATH_LENGTH = 50  # 경로 길이 제한 (stop 개수) - 100개 요청 처리 가능하도록 증가
 EARLY_TERMINATION_THRESHOLD = 1.3  # 조기 종료 임계값: 현재 최적해의 1.3배 이상이면 건너뛰기 (더 공격적)
 
-MAX_DISPATCH_ETA_SECONDS = 100000  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
+MAX_DISPATCH_ETA_SECONDS = 300  # 차량 배정 시 허용되는 최대 픽업 ETA (초 단위). 이 시간(거리) 이내에 차량이 있을 때만 배정됨.
 
 # --------------------------------------------------------------------------------------
 # 데이터 모델
@@ -187,15 +187,19 @@ class DRTAssignmentEngine:
             if len(vehicle.path) > self.max_path_length:
                 continue
 
-            # 차고지(depot)에서부터의 전체 경로 총 누적 운행 시간 계산
-            original_path_time = self._calculate_path_time(vehicle.depot_node, vehicle.path)
+            # 차량의 현재 위치(current_node)에서부터의 전체 경로 총 누적 운행 시간 계산
+            # IDLE_MOVE 경로가 있으면 배정 시에는 없는 것으로 간주함
+            is_idle_move = len(vehicle.path) == 1 and vehicle.path[0].passenger_id == "IDLE_MOVE"
+            eval_path = [] if is_idle_move else vehicle.path
+            
+            original_path_time = self._calculate_path_time(vehicle.current_node, eval_path)
             if math.isinf(original_path_time):
                 # 현재 경로조차 유효하게 계산되지 않으면 해당 차량은 배제
                 continue
 
             # 차량별 균등 샘플링: 모든 후보를 생성하고 샘플링
-            candidate_path, candidate_cost, pickup_eta = self._find_best_insertion_full(
-                vehicle, request, original_path_time
+            candidate_path, candidate_cost, pickup_eta = self._find_best_insertion_full_v2(
+                vehicle, request, original_path_time, eval_path
             )
             if candidate_path is None:
                 continue
@@ -253,16 +257,20 @@ class DRTAssignmentEngine:
             if len(vehicle.path) > self.max_path_length:
                 continue
 
-            # 차량의 현재 위치부터 남은 경로까지 거쳐가는 모든 노드를 시퀀스(경로)로 파악
-            # (차고지 경유 포함, 전체 누적 운행 시간)
-            original_path_time = self._calculate_path_time(vehicle.depot_node, vehicle.path)
+            # IDLE_MOVE 경로가 있으면 배정 시에는 없는 것으로 간주함
+            is_idle_move = len(vehicle.path) == 1 and vehicle.path[0].passenger_id == "IDLE_MOVE"
+            eval_path = [] if is_idle_move else vehicle.path
+
+            # 차량의 현재 위치(current_node)부터 남은 경로까지 거쳐가는 모든 노드를 시퀀스(경로)로 파악
+            # (차항지 경유 포함, 전체 누적 운행 시간)
+            original_path_time = self._calculate_path_time(vehicle.current_node, eval_path)
             if math.isinf(original_path_time):
                 continue
             
             # 차량 출발지(current_node) 또는 차고지(depot)에서부터의 전체 경로 중
             # request.pickup_node 를 실제로 지나가는지 확인하고,
             # 지나갈 경우 그 픽업의 Stop index 위치를 반환
-            pickup_index = self._find_pickup_index_in_route(vehicle, request.pickup_node)
+            pickup_index = self._find_pickup_index_in_route_v2(vehicle, request.pickup_node, eval_path)
             if pickup_index == -1:
                 # 이 차량의 예정 경로에 이 승객의 픽업 위치가 없음
                 continue
@@ -304,6 +312,102 @@ class DRTAssignmentEngine:
         return best_vehicle, best_new_path, min_final_cost
 
     # 내부 메서드 ---------------------------------------------------------------------
+    def _find_best_insertion_full_v2(
+        self,
+        vehicle: VehicleState,
+        request: PassengerRequest,
+        original_path_time: float,
+        eval_path: List[Stop],
+    ) -> Tuple[Optional[List[Stop]], float, float]:
+        """
+        주어진 차량 경로에서 픽업·드롭오프를 삽입할 최적 위치와 비용을 탐색 (전수 조사).
+        eval_path를 명시적으로 전달받아 IDLE_MOVE를 배제한 경로 기준으로 계산함.
+        """
+        path_len = len(eval_path)
+        
+        # 성능 최적화: 경로 길이 제한
+        if path_len + 2 > self.max_path_length:
+            # 새 경로가 제한을 초과하면 배제
+            return None, math.inf, math.inf
+
+        # 성능 최적화: 원본 경로의 중간 노드 위치를 미리 계산 (증분 계산용)
+        # 누적 운행 시간 계산을 위해 현재 위치(current_node)를 시작점으로 사용
+        original_path_nodes = self._get_path_nodes(vehicle.current_node, eval_path)
+        
+        # 모든 가능한 후보 조합 생성
+        all_candidates: List[Candidate] = []
+        for pickup_index in range(path_len + 1):
+            for dropoff_index in range(pickup_index + 1, path_len + 2):  # path_with_pickup 길이는 path_len + 1
+                all_candidates.append(Candidate(pickup_index=pickup_index, dropoff_index=dropoff_index))
+        
+        # 전수 조사: 샘플링 없이 모든 후보 평가
+        sampled_candidates = all_candidates
+        
+        # 모든 후보를 평가
+        best_path: Optional[List[Stop]] = None
+        best_partial_cost: float = math.inf   # w1*cost_increase + w2*new_path_time 항
+        best_pickup_eta: float = math.inf
+        
+        for candidate in sampled_candidates:
+            path_with_pickup = list(eval_path)
+            path_with_pickup.insert(
+                candidate.pickup_index,
+                Stop(node_id=request.pickup_node, stop_type="pickup", passenger_id=request.passenger_id),
+            )
+            
+            path_candidate = list(path_with_pickup)
+            path_candidate.insert(
+                candidate.dropoff_index,
+                Stop(node_id=request.dropoff_node, stop_type="dropoff", passenger_id=request.passenger_id),
+            )
+
+            # 성능 최적화: 경로 길이 제한
+            if len(path_candidate) > self.max_path_length:
+                continue
+
+            if not self._is_capacity_valid(path_candidate, vehicle.capacity, vehicle.onboard_passengers):
+                continue
+
+            # 성능 최적화: 증분 계산 사용
+            if path_len <= 5:
+                # 현재 위치(current_node)에서부터 전체 누적 운행 시간 다시 계산
+                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
+            else:
+                # 증분 계산 사용 (eval_path 기준)
+                new_path_time = self._calculate_path_time_incremental(
+                    vehicle.current_node,
+                    eval_path,
+                    original_path_nodes,
+                    original_path_time,
+                    candidate.pickup_index,
+                    request.pickup_node,
+                    candidate.dropoff_index,
+                    request.dropoff_node,
+                )
+            
+            if math.isinf(new_path_time):
+                continue
+
+            cost_increase = new_path_time - original_path_time
+            # w1, w2 항만 계산
+            partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
+
+            # 픽업 ETA: eval_path 기준 계산
+            pickup_eta = self._calculate_pickup_eta(
+                vehicle.current_node, eval_path, candidate.pickup_index, request.pickup_node
+            )
+
+            # 성능 최적화: 조기 종료
+            if best_partial_cost != math.inf and partial_cost > best_partial_cost * EARLY_TERMINATION_THRESHOLD:
+                continue
+
+            if partial_cost < best_partial_cost:
+                best_partial_cost = partial_cost
+                best_path = path_candidate
+                best_pickup_eta = pickup_eta
+
+        return best_path, best_partial_cost, best_pickup_eta
+
     def _find_best_insertion_full(
         self,
         vehicle: VehicleState,
@@ -332,8 +436,8 @@ class DRTAssignmentEngine:
             return None, math.inf, math.inf
 
         # 성능 최적화: 원본 경로의 중간 노드 위치를 미리 계산 (증분 계산용)
-        # 누적 운행 시간 계산을 위해 차고지(depot_node)를 시작점으로 사용
-        original_path_nodes = self._get_path_nodes(vehicle.depot_node, vehicle.path)
+        # 누적 운행 시간 계산을 위해 현재 위치(current_node)를 시작점으로 사용
+        original_path_nodes = self._get_path_nodes(vehicle.current_node, vehicle.path)
         
         # 모든 가능한 후보 조합 생성
         all_candidates: List[Candidate] = []
@@ -371,12 +475,12 @@ class DRTAssignmentEngine:
 
             # 성능 최적화: 증분 계산 사용 (경로가 짧으면 전체 계산이 더 빠를 수 있음)
             if path_len <= 5:
-                # 차고지(depot_node)에서부터 전체 누적 운행 시간 다시 계산
-                new_path_time = self._calculate_path_time(vehicle.depot_node, path_candidate)
+                # 현재 위치(current_node)에서부터 전체 누적 운행 시간 다시 계산
+                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
             else:
-                # 경로가 길면 증분 계산 사용 (차고지 출발 기준)
+                # 경로가 길면 증분 계산 사용 (현재 위치 출발 기준)
                 new_path_time = self._calculate_path_time_incremental(
-                    vehicle.depot_node,
+                    vehicle.current_node,
                     vehicle.path,
                     original_path_nodes,
                     original_path_time,
@@ -393,9 +497,9 @@ class DRTAssignmentEngine:
             # w1, w2 항만 계산 (w3 항은 assign_request에서 추가)
             partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
 
-            # 픽업 ETA: 차고지(depot) → 픽업까지 경유하는 스톱들을 따라 이동한 시간
+            # 픽업 ETA: 현재 위치(current_node) → 픽업까지 경유하는 스톱들을 따라 이동한 시간
             pickup_eta = self._calculate_pickup_eta(
-                vehicle.depot_node, vehicle.path, candidate.pickup_index, request.pickup_node
+                vehicle.current_node, vehicle.path, candidate.pickup_index, request.pickup_node
             )
 
             # 성능 최적화: 조기 종료 - 현재 최적해보다 훨씬 나쁘면 건너뛰기
@@ -424,7 +528,7 @@ class DRTAssignmentEngine:
         if path_len + 2 > self.max_path_length:
             return None, math.inf, math.inf, math.inf, False
 
-        original_path_nodes = self._get_path_nodes(vehicle.depot_node, vehicle.path)
+        original_path_nodes = self._get_path_nodes(vehicle.current_node, vehicle.path)
 
         best_path: Optional[List[Stop]] = None
         best_partial_cost: float = math.inf
@@ -451,10 +555,10 @@ class DRTAssignmentEngine:
                 continue
 
             if path_len <= 5:
-                new_path_time = self._calculate_path_time(vehicle.depot_node, path_candidate)
+                new_path_time = self._calculate_path_time(vehicle.current_node, path_candidate)
             else:
                 new_path_time = self._calculate_path_time_incremental(
-                    vehicle.depot_node, vehicle.path, original_path_nodes, original_path_time,
+                    vehicle.current_node, vehicle.path, original_path_nodes, original_path_time,
                     fixed_pickup_index, request.pickup_node, dropoff_index, request.dropoff_node
                 )
 
@@ -472,7 +576,7 @@ class DRTAssignmentEngine:
             partial_cost = (W_COST_INCREASE * cost_increase) + (W_PATH_LENGTH * new_path_time)
 
             pickup_eta = self._calculate_pickup_eta(
-                vehicle.depot_node, vehicle.path, fixed_pickup_index, request.pickup_node
+                vehicle.current_node, vehicle.path, fixed_pickup_index, request.pickup_node
             )
 
             if best_partial_cost != math.inf and partial_cost > best_partial_cost * EARLY_TERMINATION_THRESHOLD:
@@ -485,6 +589,40 @@ class DRTAssignmentEngine:
                 min_cost_increase = cost_increase
 
         return best_path, best_partial_cost, best_pickup_eta, min_cost_increase, (any_exceeded_limit and not valid_insertion_found)
+
+    def _find_pickup_index_in_route_v2(self, vehicle: VehicleState, pickup_node: int, eval_path: List[Stop]) -> int:
+        """
+        eval_path를 기준으로 픽업 노드가 길목에 있는지 확인.
+        """
+        current_node = vehicle.current_node
+
+        # 남은 Stop이 하나도 없는(비어있는) 경우
+        if not eval_path:
+            # 차량이 이미 pickup_node에 있으면 가장 앞에 삽입(0)
+            if current_node == pickup_node:
+                return 0
+            return -1
+
+        # 현재 위치와 첫 번째 Stop 사이 경로 확인
+        try:
+            route = nx.shortest_path(self.graph, current_node, eval_path[0].node_id, weight="weight")
+            if pickup_node in route:
+                return 0
+        except nx.NetworkXNoPath:
+            pass
+
+        # 중간 Stop들 사이 경로 확인
+        for i in range(len(eval_path) - 1):
+            start = eval_path[i].node_id
+            end = eval_path[i+1].node_id
+            try:
+                route = nx.shortest_path(self.graph, start, end, weight="weight")
+                if pickup_node in route:
+                    return i + 1
+            except nx.NetworkXNoPath:
+                continue
+
+        return -1
 
     def _find_pickup_index_in_route(self, vehicle: VehicleState, pickup_node: int) -> int:
         """
