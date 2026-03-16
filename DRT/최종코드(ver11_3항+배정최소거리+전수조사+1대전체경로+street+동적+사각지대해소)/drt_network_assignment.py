@@ -1,11 +1,5 @@
 """
-실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 모듈 (전수 조사 버전).
-
-주요 기능:
-    - 3항 목적함수 적용: 경로 증가량, 전체 경로 시간, 승객 대기 시간을 결합하여 최적 차량 선정
-    - 길거리 호출(Street Hail) 지원: 승객의 대기 위치가 차량의 주행 경로상에 있을 때 즉시 배차
-    - 사각지대 해소용 유휴 이동(IDLE_MOVE) 지원: 차량이 차고지나 랜덤 위치로 이동 중일 때 즉시 신규 호출 수락
-    - 동적 이동 환경 최적화: 차량의 현재 할당된 경로와 시점(schedule_start_time)을 고려한 실시간 배정
+실제 `main_network_graph.pkl` 네트워크 상에서 동작하는 1:다수 DRT 배차 알고리즘 예제 모듈 (전수 조사 버전).
 
 성능 최적화:
     - 경로 길이 제한: MAX_PATH_LENGTH=50로 제한하여 계산량 감소
@@ -80,6 +74,7 @@ class VehicleState:
     path: List[Stop] = field(default_factory=list)
     depot_node: Optional[int] = None  # 차고지(초기 출발지) 노드 추가
     schedule_start_time: float = 0.0  # [동적이동] 현재 path가 할당된 시각 (초). 차량 위치 계산의 기준.
+    reached_history: List[Tuple[Stop, float]] = field(default_factory=list) # 추가: 실제로 도달한 [정차지점, 도달시각] 기록
 
     def __post_init__(self) -> None:
         if self.depot_node is None:

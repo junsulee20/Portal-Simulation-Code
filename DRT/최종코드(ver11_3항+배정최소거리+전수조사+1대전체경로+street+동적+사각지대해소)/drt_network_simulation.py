@@ -3,11 +3,11 @@
 
 `drt_network_simulation_optimized.py`를 기반으로 하되, 향남신도시 지역으로 제한된 시뮬레이션입니다.
 
-주요 기능:
-    - 사각지대 해소용 유휴 라우팅 도입: STAY(대기), DEPOT(차고지 복귀), RANDOM(랜덤 이동) 모드 선택 가능
-    - 동적 차량 이동 처리: 시뮬레이션 시간 흐름에 따라 차량의 현재 위치(current_node)를 실시간 업데이트
-    - 통합 수요 시뮬레이션: 일반 예약 호출과 길거리 즉각 호출(Street Hail)을 동시에 처리
-    - 향남신도시 지역 특화: 특정 좌표 범위 기반 노드 필터링 및 전용 디멘드 생성
+주요 특징:
+    - 향남신도시 지역(향남1~2신도시, 발안리, 구문천리, 제암리 일대)으로 제한
+    - 디멘드 20개, 차량 5대로 설정
+    - 좌표 범위 기반 자동 노드 필터링
+    - 고정된 디멘드와 차량 초기 위치 사용
 
 성능 최적화:
     - 배정 단계에서 경로 노드 구축 제거 (시각화 단계로 지연)
@@ -67,7 +67,7 @@ STREET_HAIL_TRAVEL_TIME_INCREASE_LIMIT = 300 # 추가: 기존 통행시간 증�
 # "STAY": 가만히 있기 (기존)
 # "DEPOT": 차고지로 이동
 # "RANDOM": 랜덤한 노드로 이동
-IDLE_ROUTING_MODE = "DEPOT"
+IDLE_ROUTING_MODE = "RANDOM"
 
 # 시드 값 (고정된 디멘드 생성을 위해)
 DEMAND_SEED = 42
@@ -584,9 +584,13 @@ def advance_vehicle_position(
             break
         if remaining_time >= travel:
             # 이 Stop에 도달 완료
+            arrival_time = vehicle.schedule_start_time + (elapsed - remaining_time) + travel
             remaining_time -= travel
             new_current_node = stop.node_id
             completed_stops += 1
+            
+            # [기록] 실제로 도달한 지점을 역사에 기록 (차량별 경로 출력용)
+            vehicle.reached_history.append((stop, arrival_time))
         else:
             # 아직 이 Stop에 도달하지 못함 → 이동 중단
             break
@@ -1087,7 +1091,8 @@ class RealizedDRTSimulation:
         tick_interval = 10.0 # 10초마다 체크하도록 해상도 높임
         
         # 요청 발생 및 처리 루프
-        while (schedule_idx < total_demands or pending_requests) and current_time < max_simulation_time:
+        # 모든 요청이 발생(schedule_idx)하고, 대기 큐(pending_requests)가 비었으며, 모든 차량이 승객을 내려주고 경로를 마칠 때까지 진행
+        while (schedule_idx < total_demands or pending_requests or any(v.path for v in self.vehicles) or any(v.onboard_passengers > 0 for v in self.vehicles)) and current_time < max_simulation_time:
             # 0. [동적이동] 매 틱마다 모든 차량의 위치를 현재 시각 기준으로 갱신
             for vehicle in self.vehicles:
                 advance_vehicle_position(vehicle, current_time, self.engine.travel_time_cache)
@@ -1140,10 +1145,14 @@ class RealizedDRTSimulation:
                                 dest_node = vehicle.depot_node
                         
                         elif IDLE_ROUTING_MODE == "RANDOM":
-                            # 사각지대 해소를 위해 네트워크 내 랜덤 노드 하나 선택 후 이동
-                            dest_node = random.choice(self.allowed_nodes)
-                            while dest_node == vehicle.current_node:
+                            # 시뮬레이션 종료를 위해: 모든 요청이 처리된 상태라면 새로운 랜덤 이동을 시작하지 않음
+                            if schedule_idx >= total_demands and not pending_requests and all(v.onboard_passengers == 0 for v in self.vehicles):
+                                dest_node = None
+                            else:
+                                # 사각지대 해소를 위해 네트워크 내 랜덤 노드 하나 선택 후 이동
                                 dest_node = random.choice(self.allowed_nodes)
+                                while dest_node == vehicle.current_node:
+                                    dest_node = random.choice(self.allowed_nodes)
                         
                         if dest_node is not None:
                             # 유휴 이동용 가상 스톱 생성
@@ -1350,91 +1359,43 @@ def main() -> None:
         print()
     
     # 차량별 이동경로 출력
-    if events:
-        print("=" * 70)
-        print("🚗 차량별 이동경로 (실제 경로 순서)")
-        print("=" * 70)
+    print("=" * 70)
+    print("🚗 차량별 이동경로 (실제 도달 기록)")
+    print("=" * 70)
+    
+    for vehicle in sorted(simulation.vehicles, key=lambda v: v.vehicle_id):
+        vehicle_id = vehicle.vehicle_id
         
-        # 차량별로 이벤트 그룹화 및 시간 순서대로 정렬
-        vehicle_events: Dict[int, List[AssignmentEvent]] = {}
-        for event in events:
-            if event.vehicle_id not in vehicle_events:
-                vehicle_events[event.vehicle_id] = []
-            vehicle_events[event.vehicle_id].append(event)
+        # 실제 경로 구성: 차고지(00:00:00) -> reached_history 순서대로
+        route_parts = ["차고지(00:00:00)"]
         
-        # 각 차량의 이벤트를 시간 순서대로 정렬
-        for vehicle_id in vehicle_events:
-            vehicle_events[vehicle_id].sort(key=lambda e: e.request_time)
-        
-        # 차량별 경로 출력 (실제 경로 순서 반영)
-        for vehicle_id in sorted(vehicle_events.keys()):
-            vehicle_event_list = vehicle_events[vehicle_id]
+        for stop, arrival_time in vehicle.reached_history:
+            # 시간 (시간:분:초 형식)
+            time_hours = int(arrival_time // 3600)
+            time_minutes = int((arrival_time % 3600) // 60)
+            time_seconds = int(arrival_time % 60)
+            time_str = f"{time_hours:02d}:{time_minutes:02d}:{time_seconds:02d}"
             
-            # 차량의 초기 위치(차고지) 찾기
-            initial = next((v for v in simulation.vehicle_initials if v.vehicle_id == vehicle_id), None)
-            if not initial:
-                continue
-            
-            depot_node = initial.initial_node
-            
-            # 실제 경로 구성: 마지막 이벤트의 new_path가 최종 경로를 포함
-            # 마지막 이벤트의 경로가 모든 이전 경로를 포함하므로 이를 사용
-            if not vehicle_event_list:
-                continue
-            
-            # 마지막 이벤트의 경로가 최종 경로
-            final_event = vehicle_event_list[-1]
-            final_path = final_event.new_path
-            
-            # 경로 구성: 차고지 -> 실제 경로 순서대로
-            route_parts = []
-            
-            # 차고지 추가 (00:00:00)
-            route_parts.append(f"차고지(00:00:00)")
-            
-            # Stop별 시간 계산을 위한 매핑
-            stop_times: Dict[Tuple[str, str], float] = {}  # (stop_type, passenger_id) -> time
-            
-            # 각 이벤트의 픽업/드롭오프 시간을 기록
-            for event in vehicle_event_list:
-                req_id = event.request.passenger_id
-                stop_times[("pickup", req_id)] = event.pickup_time
-                stop_times[("dropoff", req_id)] = event.dropoff_time
-            
-            # Stop과 시간 정보를 함께 저장하고 시간 순서대로 정렬
-            stops_with_time: List[Tuple[Stop, float, int]] = []  # (stop, time, req_num)
-            for stop in final_path:
+            if stop.passenger_id == "IDLE_MOVE":
+                # 사각지대 해소를 위한 유휴 이동 표시
+                label = "차고지복귀" if IDLE_ROUTING_MODE == "DEPOT" else "랜덤이동"
+                route_parts.append(f"{label}({time_str})")
+            else:
                 req_num = request_number_map.get(stop.passenger_id, 0)
-                stop_time = stop_times.get((stop.stop_type, stop.passenger_id), 0.0)
-                stops_with_time.append((stop, stop_time, req_num))
-            
-            # 시간 순서대로 정렬
-            stops_with_time.sort(key=lambda x: x[1])  # stop_time 기준으로 정렬
-            
-            # 시간 순서대로 출력
-            for stop, stop_time, req_num in stops_with_time:
-                # 시간 (시간:분:초 형식)
-                time_hours = int(stop_time // 3600)
-                time_minutes = int((stop_time % 3600) // 60)
-                time_seconds = int(stop_time % 60)
-                
                 prefix = "Street_" if stop.is_street_hail else ""
-                
-                if stop.stop_type == "pickup":
-                    route_parts.append(f"{prefix}P{req_num}({time_hours:02d}:{time_minutes:02d}:{time_seconds:02d})")
-                else:
-                    route_parts.append(f"{prefix}D{req_num}({time_hours:02d}:{time_minutes:02d}:{time_seconds:02d})")
-            
-            # 경로 출력
-            route_str = " -> ".join(route_parts)
-            print(f"\n차량 {vehicle_id}:")
-            print(f"  {route_str}")
+                stype = "P" if stop.stop_type == "pickup" else "D"
+                route_parts.append(f"{prefix}{stype}{req_num}({time_str})")
         
-        # [참고] 메시지는 모든 차량 경로 출력 후 한 번만 출력
-        print(f"\n  [참고] 이 경로는 모든 요청이 배정된 후의 최종 경로입니다.")
-        print(f"  [참고] 각 요청 배정 시 출력된 '신규 경로'는 그 시점의 경로이며, 이후 다른 요청이 배정되면서 변경될 수 있습니다.")
-        print("\n" + "=" * 70)
-        print()
+        # 경로 출력
+        route_str = " -> ".join(route_parts)
+        print(f"\n차량 {vehicle_id}:")
+        print(f"  {route_str}")
+        
+    # [참고] 메시지는 모든 차량 경로 출력 후 한 번만 출력
+    print(f"\n  [참고] 이 경로는 모든 요청이 도달 완료된 후의 기록입니다.")
+    print(f"  [참고] '차고지복귀'나 '랜덤이동'은 승객이 없을 때 시스템이 사각지대 해소를 위해 수행한 이동입니다.")
+    print("\n" + "=" * 70)
+    print()
     
     # 최종 결과 시각화
     if events:
